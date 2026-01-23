@@ -1,25 +1,40 @@
 #include <Wire.h>
+#include <Servo.h>
+
+// Servo Objects
+Servo servoLeft;  
+Servo servoRight; 
 
 long gyroZ, gyroZ_cal;
 float angleZ = 0;
-float displayAngle = 90; // Starting at your preferred 90 degrees
+float smoothedAngle = 90; 
 unsigned long lastTime;
+
+// --- TUNING CONSTANTS (Modify these for your bike) ---
+const int CENTER_POS = 90;
+const int MAX_ANGLE = 45;
+const float SENSITIVITY = 1.2;
+const float DRIFT_GATE = 0.5;   // <--- RESTORED: Ignores vibrations
+const float SMOOTHING = 0.1;    // <--- 0.1 is smooth, 1.0 is raw
 
 void setup() {
   Serial.begin(9600);
   Wire.begin();
   
-  // Wake up MPU
+  // Assign Pins D9 and D10 to the Servo Objects
+  servoLeft.attach(9);   
+  servoRight.attach(10); 
+
+  // Wake up MPU-9250
   Wire.beginTransmission(0x68);
   Wire.write(0x6b);
   Wire.write(0);
   Wire.endTransmission(true);
 
-  Serial.println("Calibrating... Keep sensor still.");
-  // Calibration loop: Find the "Zero" error of your specific sensor
+  Serial.println("Calibrating Sensor...");
   for (int i = 0; i < 200; i++) {
     Wire.beginTransmission(0x68);
-    Wire.write(0x47); // Gyro Z registers
+    Wire.write(0x47); 
     Wire.endTransmission(false);
     Wire.requestFrom(0x68, 2, true);
     gyroZ_cal += Wire.read() << 8 | Wire.read();
@@ -27,8 +42,11 @@ void setup() {
   }
   gyroZ_cal /= 200;
   
-  Serial.println("Done! Straight ahead is now 90.00");
-  lastTime = micros(); // Using microseconds for better precision
+  // Center the "Virtual" servos immediately
+  servoLeft.write(CENTER_POS);
+  servoRight.write(CENTER_POS);
+  
+  lastTime = micros();
 }
 
 void loop() {
@@ -42,22 +60,27 @@ void loop() {
   Wire.requestFrom(0x68, 2, true);
   gyroZ = Wire.read() << 8 | Wire.read();
 
-  // Subtract the calibration error
   float actualRotZ = (gyroZ - gyroZ_cal) / 131.0;
 
-  // Drift Gate: Ignore tiny movements so the angle doesn't crawl
-  if (abs(actualRotZ) > 0.3) {
+  // The logic that keeps your lights steady at a red light
+  if (abs(actualRotZ) > DRIFT_GATE) {
     angleZ += actualRotZ * dt;
   }
 
-  // Apply the 90 degree base offset
-  displayAngle = 90 + angleZ;
+  // Calculate target with sensitivity and apply smoothing
+  float targetAngle = CENTER_POS + (angleZ * SENSITIVITY);
+  smoothedAngle = (smoothedAngle * (1.0 - SMOOTHING)) + (targetAngle * SMOOTHING);
 
-  // Constrain to Servo limits (0 to 180)
-  displayAngle = constrain(displayAngle, 0, 180);
+  // Safety constraint
+  int finalServoPos = constrain((int)smoothedAngle, CENTER_POS - MAX_ANGLE, CENTER_POS + MAX_ANGLE);
 
-  Serial.print("Sensor Raw: "); Serial.print(angleZ);
-  Serial.print(" | FOG LIGHT ANGLE: "); Serial.println(displayAngle);
+  // COMMAND: Sends data to D9 and D10
+  servoLeft.write(finalServoPos); 
+  servoRight.write(finalServoPos); 
 
-  delay(1000); 
+  // DEBUG OUTPUT
+  Serial.print("Z-Angle: "); Serial.print(angleZ);
+  Serial.print(" | Servo Output (D9/D10): "); Serial.println(finalServoPos);
+
+  delay(20); 
 }
