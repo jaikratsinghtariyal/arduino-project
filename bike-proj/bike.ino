@@ -1,36 +1,39 @@
 #include <Wire.h>
 #include <Servo.h>
 
-Servo servoLeft;
-Servo servoRight;
+Servo servo180;
+Servo servo270;
 
-// --- CONFIGURATION ---
-const int PIN_LEFT = 5; 
-const int PIN_RIGHT = 6;
-float currentAngle = 90.0;  // Start position (Straight)
-float gyroZ_offset = 0;     // To fix that -0.37 noise you saw
+// --- TUNING ---
+const float SENSITIVITY = 2.5;  
+const float DEADZONE = 1.0;     
+const int PIN_180 = 5; 
+const int PIN_270 = 6;
+
+// --- VARIABLES ---
+float currentAngle = 90.0; // Our master "straight ahead" reference
+float gyroZ_offset = 0;
+unsigned long lastMicros;
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Wire.begin();
+  Wire.setClock(400000);
   
-  servoLeft.attach(PIN_LEFT);
-  servoRight.attach(PIN_RIGHT);
+  servo180.attach(PIN_180);
+  servo270.attach(PIN_270);
 
-  // Wake up MPU-9250
+  // Wake up MPU
   Wire.beginTransmission(0x68);
   Wire.write(0x6B);
   Wire.write(0);
   Wire.endTransmission(true);
 
-  // 1. AUTO-CALIBRATION
-  // This calculates that "-0.37" offset automatically. 
-  // DO NOT MOVE THE MPU DURING THESE 2 SECONDS.
-  Serial.println("Calibrating... Keep MPU still!");
+  // Calibration (Keep MPU perfectly still!)
   long sum = 0;
   for (int i = 0; i < 500; i++) {
     Wire.beginTransmission(0x68);
-    Wire.write(0x47); // Gyro Z
+    Wire.write(0x47);
     Wire.endTransmission(false);
     Wire.requestFrom(0x68, 2, true);
     sum += (int16_t)(Wire.read() << 8 | Wire.read());
@@ -38,41 +41,47 @@ void setup() {
   }
   gyroZ_offset = sum / 500.0;
   
-  Serial.println("Calibration Done!");
-  servoLeft.write(90);
-  servoRight.write(135); // Initial center for 270 deg servo
+  // Force both to center immediately
+  servo180.write(90);
+  servo270.write(135); // 270 deg servo center is 135
+  
+  lastMicros = micros();
 }
 
 void loop() {
-  // 2. READ ROTATION SPEED
+  unsigned long currentMicros = micros();
+  float dt = (currentMicros - lastMicros) / 1000000.0; 
+  lastMicros = currentMicros;
+
   Wire.beginTransmission(0x68);
   Wire.write(0x47);
   Wire.endTransmission(false);
   Wire.requestFrom(0x68, 2, true);
   int16_t rawZ = (Wire.read() << 8 | Wire.read());
 
-  // 3. REMOVE OFFSET & CONVERT TO DEG/SEC
   float gyroZ = (rawZ - gyroZ_offset) / 131.0;
 
-  // 4. INTEGRATION (Speed * Time = Change in Angle)
-  // We run at 20ms (0.02 seconds)
-  if (abs(gyroZ) > 0.5) { // Deadzone to stop "creeping"
-    currentAngle += (gyroZ * 0.02);
+  // MATH: Add movement to currentAngle
+  if (abs(gyroZ) > DEADZONE) {
+    currentAngle += (gyroZ * dt) * SENSITIVITY;
   }
 
-  // 5. LIMITS (Keep fog lights from hitting the bike frame)
+  // LIMITS: Keep within a 90-degree total swing (45 left to 135 right)
   currentAngle = constrain(currentAngle, 45, 135);
 
-  // 6. UPDATE SERVOS
-  int pos180 = (int)currentAngle;
-  int pos270 = map(pos180, 45, 135, 90, 180);
+  // --- SERVO COMMANDS ---
+  // Servo 180: Direct mapping
+  int out180 = (int)currentAngle;
+  
+  // Servo 270: Needs to be shifted because its 90 is not the center
+  // If 180-servo is at 90 (center), 270-servo should be at 135
+  int out270 = out180 + 45; 
 
-  servoLeft.write(pos180);
-  servoRight.write(pos270);
+  servo180.write(out180);
+  servo270.write(out270);
 
-  // 7. MONITOR
-  Serial.print("Rotation Speed: "); Serial.print(gyroZ);
-  Serial.print(" | Light Angle: "); Serial.println(currentAngle);
-
-  delay(20); 
+  // DEBUGGING: Watch these numbers in Serial Monitor
+  Serial.print("GyroZ: "); Serial.print(gyroZ);
+  Serial.print(" | Angle: "); Serial.print(out180);
+  Serial.print(" | S270: "); Serial.println(out270);
 }
