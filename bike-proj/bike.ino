@@ -1,86 +1,78 @@
 #include <Wire.h>
 #include <Servo.h>
 
-// Servo Objects
-Servo servoLeft;  
-Servo servoRight; 
+Servo servoLeft;
+Servo servoRight;
 
-long gyroZ, gyroZ_cal;
-float angleZ = 0;
-float smoothedAngle = 90; 
-unsigned long lastTime;
-
-// --- TUNING CONSTANTS (Modify these for your bike) ---
-const int CENTER_POS = 90;
-const int MAX_ANGLE = 45;
-const float SENSITIVITY = 1.2;
-const float DRIFT_GATE = 0.5;   // <--- RESTORED: Ignores vibrations
-const float SMOOTHING = 0.1;    // <--- 0.1 is smooth, 1.0 is raw
+// --- CONFIGURATION ---
+const int PIN_LEFT = 5; 
+const int PIN_RIGHT = 6;
+float currentAngle = 90.0;  // Start position (Straight)
+float gyroZ_offset = 0;     // To fix that -0.37 noise you saw
 
 void setup() {
   Serial.begin(9600);
   Wire.begin();
   
-  // Assign Pins D9 and D10 to the Servo Objects
-  servoLeft.attach(9);   
-  servoRight.attach(10); 
+  servoLeft.attach(PIN_LEFT);
+  servoRight.attach(PIN_RIGHT);
 
   // Wake up MPU-9250
   Wire.beginTransmission(0x68);
-  Wire.write(0x6b);
+  Wire.write(0x6B);
   Wire.write(0);
   Wire.endTransmission(true);
 
-  Serial.println("Calibrating Sensor...");
-  for (int i = 0; i < 200; i++) {
+  // 1. AUTO-CALIBRATION
+  // This calculates that "-0.37" offset automatically. 
+  // DO NOT MOVE THE MPU DURING THESE 2 SECONDS.
+  Serial.println("Calibrating... Keep MPU still!");
+  long sum = 0;
+  for (int i = 0; i < 500; i++) {
     Wire.beginTransmission(0x68);
-    Wire.write(0x47); 
+    Wire.write(0x47); // Gyro Z
     Wire.endTransmission(false);
     Wire.requestFrom(0x68, 2, true);
-    gyroZ_cal += Wire.read() << 8 | Wire.read();
-    delay(5);
+    sum += (int16_t)(Wire.read() << 8 | Wire.read());
+    delay(2);
   }
-  gyroZ_cal /= 200;
+  gyroZ_offset = sum / 500.0;
   
-  // Center the "Virtual" servos immediately
-  servoLeft.write(CENTER_POS);
-  servoRight.write(CENTER_POS);
-  
-  lastTime = micros();
+  Serial.println("Calibration Done!");
+  servoLeft.write(90);
+  servoRight.write(135); // Initial center for 270 deg servo
 }
 
 void loop() {
-  unsigned long currentTime = micros();
-  float dt = (currentTime - lastTime) / 1000000.0;
-  lastTime = currentTime;
-
+  // 2. READ ROTATION SPEED
   Wire.beginTransmission(0x68);
   Wire.write(0x47);
   Wire.endTransmission(false);
   Wire.requestFrom(0x68, 2, true);
-  gyroZ = Wire.read() << 8 | Wire.read();
+  int16_t rawZ = (Wire.read() << 8 | Wire.read());
 
-  float actualRotZ = (gyroZ - gyroZ_cal) / 131.0;
+  // 3. REMOVE OFFSET & CONVERT TO DEG/SEC
+  float gyroZ = (rawZ - gyroZ_offset) / 131.0;
 
-  // The logic that keeps your lights steady at a red light
-  if (abs(actualRotZ) > DRIFT_GATE) {
-    angleZ += actualRotZ * dt;
+  // 4. INTEGRATION (Speed * Time = Change in Angle)
+  // We run at 20ms (0.02 seconds)
+  if (abs(gyroZ) > 0.5) { // Deadzone to stop "creeping"
+    currentAngle += (gyroZ * 0.02);
   }
 
-  // Calculate target with sensitivity and apply smoothing
-  float targetAngle = CENTER_POS + (angleZ * SENSITIVITY);
-  smoothedAngle = (smoothedAngle * (1.0 - SMOOTHING)) + (targetAngle * SMOOTHING);
+  // 5. LIMITS (Keep fog lights from hitting the bike frame)
+  currentAngle = constrain(currentAngle, 45, 135);
 
-  // Safety constraint
-  int finalServoPos = constrain((int)smoothedAngle, CENTER_POS - MAX_ANGLE, CENTER_POS + MAX_ANGLE);
+  // 6. UPDATE SERVOS
+  int pos180 = (int)currentAngle;
+  int pos270 = map(pos180, 45, 135, 90, 180);
 
-  // COMMAND: Sends data to D9 and D10
-  servoLeft.write(finalServoPos); 
-  servoRight.write(finalServoPos); 
+  servoLeft.write(pos180);
+  servoRight.write(pos270);
 
-  // DEBUG OUTPUT
-  Serial.print("Z-Angle: "); Serial.print(angleZ);
-  Serial.print(" | Servo Output (D9/D10): "); Serial.println(finalServoPos);
+  // 7. MONITOR
+  Serial.print("Rotation Speed: "); Serial.print(gyroZ);
+  Serial.print(" | Light Angle: "); Serial.println(currentAngle);
 
   delay(20); 
 }
