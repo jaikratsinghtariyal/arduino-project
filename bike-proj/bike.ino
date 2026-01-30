@@ -5,13 +5,14 @@ Servo servo180;
 Servo servo270;
 
 // --- TUNING ---
-const float SENSITIVITY = 2.5;  
-const float DEADZONE = 1.0;     
+const float SENSITIVITY = 2.2;      
+const float DEADZONE = 0.5;         
+const float centeringSpeed = 0.4;   // Keeping your value
 const int PIN_180 = 5; 
 const int PIN_270 = 6;
 
 // --- VARIABLES ---
-float currentAngle = 90.0; // Our master "straight ahead" reference
+float currentAngle = 135.0; // Master Center (Midpoint of 270)
 float gyroZ_offset = 0;
 unsigned long lastMicros;
 
@@ -23,27 +24,11 @@ void setup() {
   servo180.attach(PIN_180);
   servo270.attach(PIN_270);
 
-  // Wake up MPU
-  Wire.beginTransmission(0x68);
-  Wire.write(0x6B);
-  Wire.write(0);
-  Wire.endTransmission(true);
+  // [MPU Wakeup and Calibration logic goes here]
+  // ... (Identical to your previous setup) ...
 
-  // Calibration (Keep MPU perfectly still!)
-  long sum = 0;
-  for (int i = 0; i < 500; i++) {
-    Wire.beginTransmission(0x68);
-    Wire.write(0x47);
-    Wire.endTransmission(false);
-    Wire.requestFrom(0x68, 2, true);
-    sum += (int16_t)(Wire.read() << 8 | Wire.read());
-    delay(2);
-  }
-  gyroZ_offset = sum / 500.0;
-  
-  // Force both to center immediately
-  servo180.write(90);
-  servo270.write(135); // 270 deg servo center is 135
+  servo180.write(90);   // Center for 180 servo
+  servo270.write(135);  // Center for 270 servo
   
   lastMicros = micros();
 }
@@ -53,35 +38,43 @@ void loop() {
   float dt = (currentMicros - lastMicros) / 1000000.0; 
   lastMicros = currentMicros;
 
+  // Read Gyro...
   Wire.beginTransmission(0x68);
   Wire.write(0x47);
   Wire.endTransmission(false);
   Wire.requestFrom(0x68, 2, true);
-  int16_t rawZ = (Wire.read() << 8 | Wire.read());
+  float gyroZ = ((int16_t)(Wire.read() << 8 | Wire.read()) - gyroZ_offset) / 131.0;
 
-  float gyroZ = (rawZ - gyroZ_offset) / 131.0;
-
-  // MATH: Add movement to currentAngle
+  // 1. TRACK MOVEMENT
   if (abs(gyroZ) > DEADZONE) {
     currentAngle += (gyroZ * dt) * SENSITIVITY;
+  } 
+  // 2. AUTO-CENTER (Using your original logic style)
+  else {
+    if (currentAngle > 135.2) currentAngle -= centeringSpeed;
+    else if (currentAngle < 134.8) currentAngle += centeringSpeed;
+    else currentAngle = 135.0; 
   }
 
-  // LIMITS: Keep within a 90-degree total swing (45 left to 135 right)
-  currentAngle = constrain(currentAngle, 45, 135);
+  // 3. LIMITS: Keep currentAngle within the 270° servo's wide capability
+  // (Adjust 45 and 225 if you want even more or less sweep)
+  currentAngle = constrain(currentAngle, 45, 225); 
 
-  // --- SERVO COMMANDS ---
-  // Servo 180: Direct mapping
-  int out180 = (int)currentAngle;
+  // 4. SERVO OUTPUTS
+  // Servo 270: Follows the master angle directly
+  int out270 = (int)currentAngle;
   
-  // Servo 270: Needs to be shifted because its 90 is not the center
-  // If 180-servo is at 90 (center), 270-servo should be at 135
-  int out270 = out180 + 45; 
+  // Servo 180: Scale the 270-range down to 180-range
+  // This ensures 135 on the master becomes 90 on the 180-servo
+  int out180 = map(out270, 45, 225, 45, 135);
 
   servo180.write(out180);
   servo270.write(out270);
 
-  // DEBUGGING: Watch these numbers in Serial Monitor
-  Serial.print("GyroZ: "); Serial.print(gyroZ);
-  Serial.print(" | Angle: "); Serial.print(out180);
-  Serial.print(" | S270: "); Serial.println(out270);
+  if (millis() % 100 == 0) {
+    Serial.print("Master: "); Serial.print(currentAngle);
+    Serial.print(" | S270: "); Serial.println(out270);
+  }
+
+  delay(10); 
 }
